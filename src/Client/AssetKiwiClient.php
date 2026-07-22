@@ -4,11 +4,11 @@ declare(strict_types=1);
 
 namespace AssetKiwi\Laravel\Client;
 
+use AssetKiwi\Laravel\OAuth\OAuthManager;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Http\UploadedFile;
 
 class AssetKiwiClient
 {
@@ -34,23 +34,6 @@ class AssetKiwiClient
             $this->cacheTtl,
             fn () => $this->http()->get("/assets/{$uuid}")->json() ?? [],
         );
-    }
-
-    public function upload(UploadedFile|string $file, array $metadata = []): array
-    {
-        $request = $this->http();
-
-        if ($file instanceof UploadedFile) {
-            $request = $request->attach('file', $file->get(), $file->getClientOriginalName());
-        } else {
-            $request = $request->attach('file', fopen($file, 'r'), basename($file));
-        }
-
-        foreach ($metadata as $key => $value) {
-            $request = $request->attach($key, $value);
-        }
-
-        return $request->post('/assets')->json() ?? [];
     }
 
     public function update(string $uuid, array $data): array
@@ -126,6 +109,78 @@ class AssetKiwiClient
         return $asset['original_name'] ?? $asset['name'] ?? $asset['filename'] ?? 'Untitled';
     }
 
+    /**
+     * convenience method to get the variant image URL from an asset (without options),
+     * or a DynamicDelivery transform URL (preset Image Style or with `w`/`h`/`format`/`q`/`fit`/`gravity`).
+     *
+     * With options, `style` will route to transformUrlByStyle() (named image style),
+     * otherwise to transformUrl() (on-the-fly resizing). Without any option the original
+     * or thumb variant URL of the asset is returned.
+     *
+     * @return string|void|null
+     */
+    public function assetUrl(string $uuid, array $options = [])
+    {
+        if (isset($options['style'])) {
+            return $this->transformUrlByStyle($uuid, $options['style']);
+        }
+
+        if (count($options) > 0) {
+            return $this->transformUrl($uuid, $options);
+        }
+
+        $asset = $this->asset($uuid);
+
+        if (!$asset) {
+            return;
+        }
+
+        return $this->resolveVariantUrl($asset, 'original')
+            ?? $this->resolveVariantUrl($asset, 'thumb');
+    }
+
+    /**
+     * Build a DynamicDelivery transform URL for on-the-fly image processing.
+     *
+     * The returned URL points to the API endpoint which 302-redirects to the
+     * signed imgproxy URL.
+     */
+    public function transformUrl(string $uuid, array $options = []): string
+    {
+        $params = [];
+
+        if (isset($options['w'])) {
+            $params['w'] = (int) $options['w'];
+        }
+        if (isset($options['h'])) {
+            $params['h'] = (int) $options['h'];
+        }
+        if (isset($options['fit'])) {
+            $params['fit'] = $options['fit'];
+        }
+        if (isset($options['format'])) {
+            $params['format'] = $options['format'];
+        }
+        if (isset($options['q'])) {
+            $params['q'] = (int) $options['q'];
+        }
+        if (isset($options['gravity'])) {
+            $params['gravity'] = $options['gravity'];
+        }
+
+        $query = $params !== [] ? '?' . http_build_query($params) : '';
+
+        return rtrim($this->apiUrl, '/') . '/api/v1/media/' . $uuid . '/transform' . $query;
+    }
+
+    /**
+     * Build a DynamicDelivery transform URL using a named Image Style preset.
+     */
+    public function transformUrlByStyle(string $uuid, $imageStyleId): string
+    {
+        return rtrim($this->apiUrl, '/') . '/api/v1/media/' . $uuid . '/transform/' . $imageStyleId;
+    }
+
     public function forgetCache(string $uuid): void
     {
         Cache::forget("assetkiwi.asset.{$uuid}");
@@ -133,8 +188,28 @@ class AssetKiwiClient
 
     private function http(): PendingRequest
     {
-        return Http::withToken($this->apiToken)
+        return Http::withToken($this->resolveToken())
             ->acceptJson()
             ->baseUrl($this->baseUrl);
+    }
+
+    /**
+     * Resolve the API token to use for requests.
+     *
+     * When OAuth is enabled and the current user has a per-user token,
+     * that token is used. Otherwise falls back to the shared config token.
+     */
+    protected function resolveToken(): ?string
+    {
+        if (! config('assetkiwi.oauth.enabled', false)) {
+            return $this->apiToken;
+        }
+
+        $user = request()->user();
+        if ($user) {
+            return OAuthManager::getToken($user) ?? $this->apiToken;
+        }
+
+        return $this->apiToken;
     }
 }

@@ -9,7 +9,6 @@ use Illuminate\Support\Facades\Facade;
 /**
  * @method static array assets(array $params = [])
  * @method static array asset(string $uuid)
- * @method static array upload(\Illuminate\Http\UploadedFile|string $file, array $metadata = [])
  * @method static array update(string $uuid, array $data)
  * @method static bool delete(string $uuid)
  * @method static \Illuminate\Http\Client\Response download(string $uuid)
@@ -22,6 +21,9 @@ use Illuminate\Support\Facades\Facade;
  * @method static string|null resolveVariantUrl(array $asset, string $variant)
  * @method static string getDisplayName(array $asset)
  * @method static void forgetCache(string $uuid)
+ * @method static string|null assetUrl(string $uuid, array $options = [])
+ * @method static string transformUrl(string $uuid, array $options = [])
+ * @method static string transformUrlByStyle(string $uuid, $imageStyleId)
  *
  * @see \AssetKiwi\Laravel\Client\AssetKiwiClient
  */

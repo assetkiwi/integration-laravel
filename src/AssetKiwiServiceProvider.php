@@ -20,7 +20,7 @@ class AssetKiwiServiceProvider extends ServiceProvider
     {
         $this->mergeConfigFrom(__DIR__ . '/../config/assetkiwi.php', 'assetkiwi');
 
-        $this->app->singleton(AssetKiwiClient::class, function ($app) {
+        $this->app->scoped(AssetKiwiClient::class, function ($app) {
             return new AssetKiwiClient(
                 apiUrl: config('assetkiwi.api_url'),
                 apiToken: config('assetkiwi.api_token'),
@@ -37,7 +37,10 @@ class AssetKiwiServiceProvider extends ServiceProvider
         $this->registerViews();
         $this->registerFilesystemDriver();
         $this->registerRoutes();
+        $this->registerOAuthRoutes();
         $this->registerBladeComponents();
+        $this->registerBladeDirectives();
+        $this->registerCommands();
     }
 
     private function registerPublishing(): void
@@ -80,8 +83,48 @@ class AssetKiwiServiceProvider extends ServiceProvider
         }
     }
 
+    private function registerOAuthRoutes(): void
+    {
+        if (! $this->app->routesAreCached() && config('assetkiwi.oauth.enabled', false)) {
+            Route::middleware('web')->group(function () {
+                $redirectUri = config('assetkiwi.oauth.redirect_uri');
+                $path = $redirectUri
+                    ? trim((string) parse_url($redirectUri, PHP_URL_PATH), '/')
+                    : 'assetkiwi/oauth/callback';
+
+                Route::get($path, [\AssetKiwi\Laravel\Http\Controllers\OAuthController::class, 'callback'])
+                    ->name('assetkiwi.oauth.callback');
+            });
+        }
+    }
+
     private function registerBladeComponents(): void
     {
         Blade::component('assetkiwi-image', \AssetKiwi\Laravel\View\Components\Image::class);
+    }
+
+    private function registerBladeDirectives(): void
+    {
+        Blade::directive('asset', function ($expression) {
+            return "<?php echo app('assetkiwi')->assetUrl({$expression}); ?>";
+        });
+    }
+
+    private function registerCommands(): void
+    {
+        if ($this->app->runningInConsole()) {
+            $this->commands([
+                \AssetKiwi\Laravel\Console\Commands\ClearCacheCommand::class,
+                \AssetKiwi\Laravel\Console\Commands\SyncUsageCommand::class,
+                \AssetKiwi\Laravel\Console\Commands\StatsCommand::class,
+            ]);
+        }
+    }
+}
+
+if (!function_exists('assetkiwi_asset')) {
+    function assetkiwi_asset(string $uuid, array $options = []): ?string
+    {
+        return app('assetkiwi')->assetUrl($uuid, $options);
     }
 }

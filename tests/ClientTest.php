@@ -197,4 +197,110 @@ class ClientTest extends TestCase
         $this->client()->forgetCache('abc-123');
         $this->assertFalse(Cache::has('assetkiwi.asset.abc-123'));
     }
+
+    public function test_transform_url_builds_url_with_options(): void
+    {
+        $url = $this->client()->transformUrl('abc-123', ['w' => 800, 'format' => 'webp']);
+
+        $this->assertStringContainsString('/api/v1/media/abc-123/transform', $url);
+        $this->assertStringContainsString('w=800', $url);
+        $this->assertStringContainsString('format=webp', $url);
+    }
+
+    public function test_transform_url_with_no_options(): void
+    {
+        $url = $this->client()->transformUrl('abc-123');
+
+        $this->assertSame('https://dam.example.com/api/v1/media/abc-123/transform', $url);
+    }
+
+    public function test_transform_url_filters_unknown_options(): void
+    {
+        $url = $this->client()->transformUrl('abc-123', ['w' => 400, 'unknown' => 'ignored']);
+
+        $this->assertStringContainsString('w=400', $url);
+        $this->assertStringNotContainsString('ignored', $url);
+    }
+
+    public function test_transform_url_by_style(): void
+    {
+        $url = $this->client()->transformUrlByStyle('abc-123', 'hero-banner');
+
+        $this->assertSame('https://dam.example.com/api/v1/media/abc-123/transform/hero-banner', $url);
+    }
+
+    public function test_transform_url_by_style_with_integer_id(): void
+    {
+        $url = $this->client()->transformUrlByStyle('abc-123', 5);
+
+        $this->assertSame('https://dam.example.com/api/v1/media/abc-123/transform/5', $url);
+    }
+
+    public function test_asset_url_with_no_options_returns_variant_url(): void
+    {
+        Http::fake([
+            'dam.example.com/api/v1/assets/abc-123' => Http::response([
+                'uuid' => 'abc-123',
+                'variants' => [
+                    ['variant_name' => 'original', 'url' => 'https://dam.example.com/original.jpg'],
+                    ['variant_name' => 'thumb', 'url' => 'https://dam.example.com/thumb.jpg'],
+                ],
+            ]),
+        ]);
+
+        $url = $this->client()->assetUrl('abc-123');
+
+        $this->assertSame('https://dam.example.com/original.jpg', $url);
+    }
+
+    public function test_asset_url_with_no_options_falls_back_to_thumb(): void
+    {
+        Http::fake([
+            'dam.example.com/api/v1/assets/abc-123' => Http::response([
+                'uuid' => 'abc-123',
+                'variants' => [
+                    ['variant_name' => 'thumb', 'url' => 'https://dam.example.com/thumb.jpg'],
+                ],
+            ]),
+        ]);
+
+        $url = $this->client()->assetUrl('abc-123');
+
+        $this->assertSame('https://dam.example.com/thumb.jpg', $url);
+    }
+
+    public function test_asset_url_returns_null_for_missing_asset(): void
+    {
+        Http::fake([
+            'dam.example.com/api/v1/assets/missing' => Http::response([], 404),
+        ]);
+
+        $url = $this->client()->assetUrl('missing');
+
+        $this->assertNull($url);
+    }
+
+    public function test_asset_url_with_options_returns_transform_url(): void
+    {
+        $url = $this->client()->assetUrl('abc-123', ['w' => 400, 'q' => 80]);
+
+        $this->assertStringContainsString('/api/v1/media/abc-123/transform', $url);
+        $this->assertStringContainsString('w=400', $url);
+        $this->assertStringContainsString('q=80', $url);
+    }
+
+    public function test_asset_url_with_style_option_returns_style_url(): void
+    {
+        $url = $this->client()->assetUrl('abc-123', ['style' => 'hero-banner']);
+
+        $this->assertSame('https://dam.example.com/api/v1/media/abc-123/transform/hero-banner', $url);
+    }
+
+    public function test_asset_url_style_takes_priority_over_other_options(): void
+    {
+        $url = $this->client()->assetUrl('abc-123', ['style' => 'hero', 'w' => 400]);
+
+        // style should take priority, so it's a transformUrlByStyle call
+        $this->assertSame('https://dam.example.com/api/v1/media/abc-123/transform/hero', $url);
+    }
 }

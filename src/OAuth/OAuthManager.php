@@ -38,7 +38,7 @@ class OAuthManager
             'code_challenge_method' => 'S256',
         ];
 
-        return config('assetkiwi.oauth.authorize_url') . '?' . http_build_query($params);
+        return static::getAuthorizeUrl() . '?' . http_build_query($params);
     }
 
     /**
@@ -46,7 +46,7 @@ class OAuthManager
      */
     public static function exchangeCode(string $code, string $state, string $codeVerifier): ?array
     {
-        $response = Http::asForm()->post(config('assetkiwi.oauth.token_url'), [
+        $response = Http::asForm()->post(static::getTokenUrl(), [
             'grant_type' => 'authorization_code',
             'code' => $code,
             'client_id' => config('assetkiwi.oauth.client_id'),
@@ -95,5 +95,28 @@ class OAuthManager
         }
 
         return null;
+    }
+
+    /**
+     * The asset.kiwi OAuth2 authorization endpoint.
+     *
+     * Derived from api_url by default — asset.kiwi's OAuth routes are fixed
+     * (/oauth/authorize, /oauth/token), so there's no need to configure them
+     * separately. ASSETKIWI_OAUTH_AUTHORIZE_URL remains available as an
+     * explicit override (e.g. pointing at a different auth server).
+     */
+    protected static function getAuthorizeUrl(): string
+    {
+        return config('assetkiwi.oauth.authorize_url')
+            ?: rtrim((string) config('assetkiwi.api_url'), '/') . '/oauth/authorize';
+    }
+
+    /**
+     * The asset.kiwi OAuth2 token endpoint. See getAuthorizeUrl().
+     */
+    protected static function getTokenUrl(): string
+    {
+        return config('assetkiwi.oauth.token_url')
+            ?: rtrim((string) config('assetkiwi.api_url'), '/') . '/oauth/token';
     }
 }

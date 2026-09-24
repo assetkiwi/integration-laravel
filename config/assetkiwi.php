@@ -44,6 +44,10 @@ return [
         'client_id' => env('ASSETKIWI_OAUTH_CLIENT_ID'),
         'client_secret' => env('ASSETKIWI_OAUTH_CLIENT_SECRET'),
 
+        // Optional — asset.kiwi's OAuth routes are fixed (/oauth/authorize,
+        // /oauth/token), so OAuthManager derives these from api_url above
+        // when left unset. Only set these if you're authenticating against
+        // a different auth server than api_url.
         'authorize_url' => env('ASSETKIWI_OAUTH_AUTHORIZE_URL'),
         'token_url' => env('ASSETKIWI_OAUTH_TOKEN_URL'),
 

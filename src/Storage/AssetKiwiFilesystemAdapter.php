@@ -10,7 +10,9 @@ use Illuminate\Support\Str;
 use League\Flysystem\Config;
 use League\Flysystem\FileAttributes;
 use League\Flysystem\FilesystemAdapter;
+use League\Flysystem\UnableToCopyFile;
 use League\Flysystem\UnableToDeleteFile;
+use League\Flysystem\UnableToMoveFile;
 use League\Flysystem\UnableToReadFile;
 use League\Flysystem\UnableToRetrieveMetadata;
 use League\Flysystem\UnableToWriteFile;
@@ -29,28 +31,29 @@ class AssetKiwiFilesystemAdapter implements FilesystemAdapter
         return false;
     }
 
+    /**
+     * Uploads a new asset; `$path` only supplies the file name (asset.kiwi assigns the UUID).
+     * A duplicate (409) counts as success: the identical file already exists.
+     */
     public function write(string $path, string $contents, Config $config): void
     {
         $tmp = tempnam(sys_get_temp_dir(), 'assetkiwi_');
         file_put_contents($tmp, $contents);
 
         try {
-            $this->client->upload($tmp);
+            $response = $this->client->upload($tmp, basename($path));
         } finally {
             @unlink($tmp);
+        }
+
+        if (! $response->successful() && $response->status() !== 409) {
+            throw UnableToWriteFile::atLocation($path, (string) $response->json('message', 'HTTP ' . $response->status()));
         }
     }
 
     public function writeStream(string $path, $contents, Config $config): void
     {
-        $tmp = tempnam(sys_get_temp_dir(), 'assetkiwi_');
-        file_put_contents($tmp, $contents);
-
-        try {
-            $this->client->upload($tmp);
-        } finally {
-            @unlink($tmp);
-        }
+        $this->write($path, stream_get_contents($contents), $config);
     }
 
     public function read(string $path): string
@@ -134,9 +137,15 @@ class AssetKiwiFilesystemAdapter implements FilesystemAdapter
         }
     }
 
-    public function move(string $source, string $destination, Config $config): void {}
+    public function move(string $source, string $destination, Config $config): void
+    {
+        throw UnableToMoveFile::fromLocationTo($source, $destination);
+    }
 
-    public function copy(string $source, string $destination, Config $config): void {}
+    public function copy(string $source, string $destination, Config $config): void
+    {
+        throw UnableToCopyFile::fromLocationTo($source, $destination);
+    }
 
     public function url(string $uuid): string
     {

@@ -24,7 +24,7 @@ class AssetKiwiServiceProvider extends ServiceProvider
             return new AssetKiwiClient(
                 apiUrl: config('assetkiwi.api_url'),
                 apiToken: config('assetkiwi.api_token'),
-                cacheTtl: (int) config('assetkiwi.cache_ttl', 3600),
+                cacheTtl: (int) config('assetkiwi.cache_ttl', 3000),
             );
         });
 

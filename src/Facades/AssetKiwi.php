@@ -19,6 +19,7 @@ use Illuminate\Support\Facades\Facade;
  * @method static array reportUsage(string $uuid, string $entityType, string $entityId, ?string $url = null, ?string $site = null)
  * @method static bool removeUsage(string $uuid, string $entityType, string $entityId, ?string $site = null)
  * @method static string|null resolveVariantUrl(array $asset, string $variant)
+ * @method static array{src: string, srcset: string, sizes: string}|null imageAttributes(array $asset)
  * @method static string getDisplayName(array $asset)
  * @method static void forgetCache(string $uuid)
  * @method static string|null assetUrl(string $uuid, array $options = [])

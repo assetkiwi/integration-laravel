@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace AssetKiwi\Laravel\Http\Controllers;
 
 use AssetKiwi\Laravel\Events\AssetDeleted;
+use AssetKiwi\Laravel\Events\AssetPermanentlyDeleted;
 use AssetKiwi\Laravel\Events\AssetUpdated;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -22,11 +23,14 @@ class WebhookController extends Controller
 
         $event = $payload['event'];
         $data = $payload['data'] ?? [];
-        $uuid = $data['uuid'] ?? $data['id'] ?? null;
+        // Asset events identify the asset by `uuid`; the integer `id` is internal and
+        // useless for the cache or the API, so an event without a uuid is not dispatched.
+        $uuid = is_string($data['uuid'] ?? null) && $data['uuid'] !== '' ? $data['uuid'] : null;
 
         match ($event) {
             'asset.updated' => $uuid ? AssetUpdated::dispatch($uuid, $data) : null,
             'asset.deleted' => $uuid ? AssetDeleted::dispatch($uuid, $data) : null,
+            'asset.permanently_deleted' => $uuid ? AssetPermanentlyDeleted::dispatch($uuid, $data) : null,
             'webhook.test'  => null,
             default         => null,
         };

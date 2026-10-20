@@ -6,6 +6,7 @@ namespace AssetKiwi\Laravel\Tests;
 
 use AssetKiwi\Laravel\AssetKiwiServiceProvider;
 use AssetKiwi\Laravel\Events\AssetDeleted;
+use AssetKiwi\Laravel\Events\AssetPermanentlyDeleted;
 use AssetKiwi\Laravel\Events\AssetUpdated;
 use Illuminate\Support\Facades\Event;
 use Orchestra\Testbench\TestCase;
@@ -112,6 +113,36 @@ class WebhookTest extends TestCase
         Event::assertDispatched(AssetDeleted::class, function (AssetDeleted $event) {
             return $event->uuid === 'abc-123';
         });
+    }
+
+    public function test_dispatches_asset_permanently_deleted_event(): void
+    {
+        Event::fake();
+
+        $this->postWebhook([
+            'event' => 'asset.permanently_deleted',
+            'data'  => ['id' => 7, 'uuid' => 'abc-123', 'type' => 'Asset'],
+        ])->assertStatus(200);
+
+        Event::assertDispatched(AssetPermanentlyDeleted::class, fn ($e) => $e->uuid === 'abc-123');
+    }
+
+    public function test_prefers_uuid_over_integer_id(): void
+    {
+        Event::fake();
+
+        $this->postWebhook(['event' => 'asset.updated', 'data' => ['id' => 4182, 'uuid' => 'abc-123']]);
+
+        Event::assertDispatched(AssetUpdated::class, fn ($e) => $e->uuid === 'abc-123');
+    }
+
+    public function test_skips_dispatch_when_only_integer_id_present(): void
+    {
+        Event::fake();
+
+        $this->postWebhook(['event' => 'asset.deleted', 'data' => ['id' => 4182]])->assertStatus(200);
+
+        Event::assertNotDispatched(AssetDeleted::class);
     }
 
     public function test_returns_400_for_missing_event(): void

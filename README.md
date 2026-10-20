@@ -25,7 +25,7 @@ Add your credentials to `.env`:
 ASSETKIWI_API_URL=https://your-assetkiwi-instance.com
 ASSETKIWI_API_TOKEN=your-api-token
 ASSETKIWI_WEBHOOK_SECRET=your-webhook-secret
-ASSETKIWI_CACHE_TTL=3600
+ASSETKIWI_CACHE_TTL=3000
 ```
 
 ## Configuration
@@ -37,11 +37,11 @@ return [
     'api_url'        => env('ASSETKIWI_API_URL', ''),
     'api_token'      => env('ASSETKIWI_API_TOKEN', ''),
     'webhook_secret' => env('ASSETKIWI_WEBHOOK_SECRET', ''),
-    'cache_ttl'      => env('ASSETKIWI_CACHE_TTL', 3600),
+    'cache_ttl'      => env('ASSETKIWI_CACHE_TTL', 3000),
 ];
 ```
 
-`cache_ttl` controls how long individual asset metadata responses are cached (in seconds). Set to `0` to disable caching.
+`cache_ttl` controls how long individual asset metadata responses are cached (in seconds). Set to `0` to disable caching. It is capped at 3000 seconds, because the signed `url` and `variants` URLs in a response expire after 60 minutes. Failed lookups are never cached.
 
 ### OAuth2 (Per-User Authentication)
 
@@ -55,10 +55,9 @@ Set `ASSETKIWI_OAUTH_ENABLED=true` and configure the OAuth client credentials:
 ASSETKIWI_OAUTH_ENABLED=true
 ASSETKIWI_OAUTH_CLIENT_ID=your-oauth-client-id
 ASSETKIWI_OAUTH_CLIENT_SECRET=your-oauth-client-secret
-ASSETKIWI_OAUTH_AUTHORIZE_URL=https://dam.example.com/oauth/authorize
-ASSETKIWI_OAUTH_TOKEN_URL=https://dam.example.com/oauth/token
 ASSETKIWI_OAUTH_REDIRECT_URI=https://your-app.com/assetkiwi/oauth/callback
-ASSETKIWI_OAUTH_SCOPES=assets:read
+# Optional, defaults shown:
+ASSETKIWI_OAUTH_SCOPES="assets:read collections:read tags:read"
 ```
 
 | Variable | Default | Description |
@@ -66,10 +65,10 @@ ASSETKIWI_OAUTH_SCOPES=assets:read
 | `ASSETKIWI_OAUTH_ENABLED` | `false` | Enable per-user OAuth authentication |
 | `ASSETKIWI_OAUTH_CLIENT_ID` | — | OAuth2 client ID from the DAM app |
 | `ASSETKIWI_OAUTH_CLIENT_SECRET` | — | OAuth2 client secret from the DAM app |
-| `ASSETKIWI_OAUTH_AUTHORIZE_URL` | — | Authorization endpoint (e.g. `https://dam.example.com/oauth/authorize`) |
-| `ASSETKIWI_OAUTH_TOKEN_URL` | — | Token endpoint (e.g. `https://dam.example.com/oauth/token`) |
+| `ASSETKIWI_OAUTH_AUTHORIZE_URL` | `<api_url>/oauth/authorize` | Optional override, only for a different auth server |
+| `ASSETKIWI_OAUTH_TOKEN_URL` | `<api_url>/oauth/token` | Optional override, only for a different auth server |
 | `ASSETKIWI_OAUTH_REDIRECT_URI` | — | Callback URL in this Laravel app (must match the registered redirect URI) |
-| `ASSETKIWI_OAUTH_SCOPES` | `assets:read` | Space-separated list of requested scopes |
+| `ASSETKIWI_OAUTH_SCOPES` | `assets:read collections:read tags:read` | Space-separated list of requested scopes |
 
 #### Setting Up the OAuth Client in the DAM App
 
@@ -208,11 +207,13 @@ $exists = Storage::disk('assetkiwi')->exists($uuid);
 // Download content
 $content = Storage::disk('assetkiwi')->get($uuid);
 
-// Upload
-Storage::disk('assetkiwi')->put('ignored-path', $fileContents);
+// Upload (POST /api/v1/assets, needs the assets:write ability).
+// The path only supplies the file name; asset.kiwi assigns the UUID.
+// A duplicate file (HTTP 409) counts as success; other failures throw UnableToWriteFile.
+Storage::disk('assetkiwi')->put('photo.jpg', $fileContents);
 ```
 
-> **Note:** The AssetKiwi disk uses asset UUIDs as paths. The `driver`, `move`, and `copy` operations are no-ops since AssetKiwi manages file identity.
+> **Note:** The disk uses asset UUIDs as paths for reading, deleting and metadata. `move` and `copy` are not supported and throw. Directory operations and visibility are no-ops. To get the new asset's UUID, call `AssetKiwi::upload($path, $filename, $params)` instead and read the response.
 
 ---
 
@@ -229,13 +230,14 @@ use AssetKiwi\Laravel\Events\AssetUpdated;
 use AssetKiwi\Laravel\Events\AssetDeleted;
 
 // AssetUpdated has:
-//   $event->uuid  — the asset UUID
+//   $event->uuid  — the asset UUID (from data.uuid)
 //   $event->data  — the full webhook payload data
 
-// AssetDeleted has:
-//   $event->uuid
-//   $event->data
+// AssetDeleted (asset moved to trash) and AssetPermanentlyDeleted
+// (asset.permanently_deleted) have the same two properties.
 ```
+
+Events are matched by `data.uuid`. A payload that only carries the integer `id` is acknowledged with `200` but no event is dispatched.
 
 ### Listening
 
@@ -306,10 +308,13 @@ If your model has a `url()` method, it will be included as `source_url` in the u
 
 The component:
 - Fetches asset metadata (uses the configured cache)
-- Resolves the variant URL (falls back to `original` if the requested variant is not found)
+- For **public images**, renders stable URLs that never expire: `src` and a `srcset` built from `image_transform` (`{api_url}/media/serve/{uuid}/transform?w=N` over the allowed widths, up to the original width), with `sizes`. `variant` is ignored.
+- For other assets, resolves the signed variant URL (falls back to `original` if the requested variant is not found). Signed URLs expire after about an hour, so don't put this output in a page or response cache that lives longer; make assets public for public pages.
 - Uses `alt_text` or `original_name` from the asset as the default `alt` attribute
-- Uses variant width/height metadata if `:width` and `:height` are not provided
+- Uses the image's (or variant's) width/height metadata if `:width` and `:height` are not provided
 - Renders nothing if no URL can be resolved
+
+For your own markup, `AssetKiwi::imageAttributes($asset)` returns `['src' => ..., 'srcset' => ..., 'sizes' => ...]` for a public image, or `null`.
 
 ---
 
@@ -318,14 +323,14 @@ The component:
 Use the `@asset` Blade directive to generate DynamicDelivery transform URLs.
 
 ```blade
-{{-- Basic: serve original/thumb variant --}}
+{{-- Basic: the stable embed_url of a public asset (else a signed original/thumb variant URL) --}}
 <img src="@asset('550e8400-e29b-41d4-a716-446655440000')">
 
 {{-- On-the-fly resize via DynamicDelivery --}}
 <img src="@asset('550e8400-e29b-41d4-a716-446655440000', ['w' => 800, 'format' => 'webp'])">
 
-{{-- Named image style --}}
-<img src="@asset('550e8400-e29b-41d4-a716-446655440000', ['style' => 'hero-banner'])">
+{{-- Named image style (its numeric id) --}}
+<img src="@asset('550e8400-e29b-41d4-a716-446655440000', ['style' => 12])">
 ```
 
 **Programmatic API:**
@@ -334,13 +339,13 @@ Use the `@asset` Blade directive to generate DynamicDelivery transform URLs.
 // On-the-fly transform with width, height, format, quality, fit, gravity
 $url = AssetKiwi::transformUrl($uuid, ['w' => 800, 'format' => 'webp', 'q' => 85]);
 
-// Named image style preset
-$url = AssetKiwi::transformUrlByStyle($uuid, 'hero-banner');
+// Named image style preset (numeric id from AssetKiwi::imageStyles())
+$url = AssetKiwi::transformUrlByStyle($uuid, 12);
 
-// Convenience: variant URL fallback or transform URL
-$url = AssetKiwi::assetUrl($uuid);                        // original/thumb variant
+// Convenience: stable embed_url / variant URL, or transform URL
+$url = AssetKiwi::assetUrl($uuid);                        // embed_url, else signed original/thumb variant
 $url = AssetKiwi::assetUrl($uuid, ['w' => 400]);          // transform
-$url = AssetKiwi::assetUrl($uuid, ['style' => 'hero']);    // style preset
+$url = AssetKiwi::assetUrl($uuid, ['style' => 12]);       // style preset
 ```
 
 **Global helper:**
@@ -350,7 +355,7 @@ $url = assetkiwi_asset('UUID');
 $url = assetkiwi_asset('UUID', ['w' => 800, 'format' => 'webp']);
 ```
 
-The returned URL points to the AssetKiwi API endpoint, which 302-redirects to the signed imgproxy URL.
+Transform URLs (`{api_url}/media/serve/{uuid}/transform`) are not signed and don't expire. Visitors without an API token can load them only for public assets, and get only `w`/`h` (snapped to the allowed widths, listed in the asset's `image_transform.widths`); `fit`, `format`, `q` and `gravity` need a token.
 
 ---
 
@@ -422,6 +427,15 @@ $this->assertSame('photo.jpg', AssetKiwi::getDisplayName($asset));
 ```
 
 ---
+
+## Changelog
+
+### Unreleased
+
+- `<x-assetkiwi-image>` renders public images from stable transform URLs with a `srcset`; new `imageAttributes()` helper.
+- `assetUrl()` without options returns the stable `embed_url` for public assets.
+- Asset responses are cached for at most 3000 seconds (default `cache_ttl` 3000), and failed lookups are no longer cached.
+- Variant lookups accept responses wrapped in `data`.
 
 ## License
 

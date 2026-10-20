@@ -12,6 +12,8 @@ class Image extends Component
 {
     public readonly array $asset;
     public readonly ?string $src;
+    public readonly ?string $srcset;
+    public readonly ?string $sizes;
     public readonly string $altText;
     public readonly ?int $imgWidth;
     public readonly ?int $imgHeight;
@@ -25,9 +27,16 @@ class Image extends Component
         public readonly ?int $width = null,
         public readonly ?int $height = null,
     ) {
-        $this->asset = $client->asset($uuid);
+        $asset = $client->asset($uuid);
+        $this->asset = $asset['data'] ?? $asset;
 
-        $this->src = $client->resolveVariantUrl($this->asset, $variant)
+        // Public images: stable, resizable URLs with a srcset. Others: the
+        // API's signed variant URL, which expires after about an hour.
+        $public = $client->imageAttributes($this->asset);
+        $this->srcset = $public['srcset'] ?? null;
+        $this->sizes = $public['sizes'] ?? null;
+        $this->src = $public['src']
+            ?? $client->resolveVariantUrl($this->asset, $variant)
             ?? $client->resolveVariantUrl($this->asset, 'original');
 
         $this->altText = $alt
@@ -35,7 +44,7 @@ class Image extends Component
             ?? $this->asset['original_name']
             ?? '';
 
-        $variantData = collect($this->asset['variants'] ?? [])->firstWhere('variant_name', $variant);
+        $variantData = $public ? $this->asset : collect($this->asset['variants'] ?? [])->firstWhere('variant_name', $variant);
         $this->imgWidth  = $width  ?? ($variantData['width']  ?? null);
         $this->imgHeight = $height ?? ($variantData['height'] ?? null);
     }

@@ -27,13 +27,65 @@ class AssetKiwiClient
         return $this->http()->get('/assets', $params)->json() ?? [];
     }
 
+    /**
+     * Longest time an asset response is cached: below the API's 60-minute
+     * signed-URL lifetime, so cached `url`/`variants` are still valid.
+     */
+    public const MAX_ASSET_CACHE_SECONDS = 3000;
+
+    /**
+     * Widths visitors may request from a public transform URL; fallback for
+     * responses without `image_transform.widths`.
+     */
+    public const DEFAULT_WIDTHS = [160, 320, 640, 960, 1280, 1920, 2560];
+
+    /**
+     * Fetches an asset. Successful responses are cached (at most
+     * MAX_ASSET_CACHE_SECONDS); errors are never cached.
+     */
     public function asset(string $uuid): array
     {
-        return Cache::remember(
-            "assetkiwi.asset.{$uuid}",
-            $this->cacheTtl,
-            fn () => $this->http()->get("/assets/{$uuid}")->json() ?? [],
-        );
+        $key = "assetkiwi.asset.{$uuid}";
+        if (($cached = Cache::get($key)) !== null) {
+            return $cached;
+        }
+
+        $response = $this->http()->get("/assets/{$uuid}");
+        $asset = $response->successful() ? ($response->json() ?? []) : [];
+        if ($asset !== [] && $this->cacheTtl > 0) {
+            Cache::put($key, $asset, min($this->cacheTtl, self::MAX_ASSET_CACHE_SECONDS));
+        }
+
+        return $asset;
+    }
+
+    /**
+     * src, srcset and sizes for a public image, from the asset's stable
+     * transform URL (`image_transform`). Widths above the original are left out.
+     *
+     * @return array{src: string, srcset: string, sizes: string}|null  Null when
+     *   the asset has no public transform URL (not public, or not an image).
+     */
+    public function imageAttributes(array $asset): ?array
+    {
+        $asset = $asset['data'] ?? $asset;
+        $base = $asset['image_transform']['url'] ?? null;
+        if (! $base) {
+            return null;
+        }
+
+        $widths = array_map('intval', $asset['image_transform']['widths'] ?? []) ?: self::DEFAULT_WIDTHS;
+        sort($widths);
+        $original = (int) ($asset['width'] ?? 0);
+        $usable = $original > 0 ? array_values(array_filter($widths, fn (int $w) => $w <= $original)) : $widths;
+        $usable = $usable ?: [$widths[0]];
+
+        return [
+            // The server snaps any width up to an allowed one.
+            'src' => $base . '?w=' . min(1280, end($usable)),
+            'srcset' => implode(', ', array_map(fn (int $w) => "{$base}?w={$w} {$w}w", $usable)),
+            'sizes' => $original > 0 ? "(max-width: {$original}px) 100vw, {$original}px" : '100vw',
+        ];
     }
 
     public function update(string $uuid, array $data): array
@@ -53,6 +105,19 @@ class AssetKiwiClient
     public function download(string $uuid): Response
     {
         return $this->http()->post("/assets/{$uuid}/download");
+    }
+
+    /**
+     * Upload a local file via POST /api/v1/assets (needs the assets:write ability).
+     *
+     * Returns the raw response: 201 = created, 409 = duplicate (body has `existing_uuid`).
+     * `$params` takes any documented field, e.g. alt_text, tag_names, collection_ids.
+     */
+    public function upload(string $filePath, ?string $filename = null, array $params = []): Response
+    {
+        return $this->http()
+            ->attach('file', fopen($filePath, 'r'), $filename ?? basename($filePath))
+            ->post('/assets', $params);
     }
 
     public function collections(array $params = []): array
@@ -96,7 +161,7 @@ class AssetKiwiClient
 
     public function resolveVariantUrl(array $asset, string $variant): ?string
     {
-        foreach ($asset['variants'] ?? [] as $v) {
+        foreach (($asset['data'] ?? $asset)['variants'] ?? [] as $v) {
             if (($v['variant_name'] ?? '') === $variant) {
                 return $v['url'] ?? null;
             }
@@ -110,7 +175,7 @@ class AssetKiwiClient
     }
 
     /**
-     * convenience method to get the variant image URL from an asset (without options),
+     * convenience method to get the asset's URL (without options: its stable `embed_url` when public, else a signed variant URL),
      * or a DynamicDelivery transform URL (preset Image Style or with `w`/`h`/`format`/`q`/`fit`/`gravity`).
      *
      * With options, `style` will route to transformUrlByStyle() (named image style),
@@ -135,15 +200,19 @@ class AssetKiwiClient
             return;
         }
 
-        return $this->resolveVariantUrl($asset, 'original')
+        // Stable public URL when the asset is public; signed (expiring) otherwise.
+        return ($asset['data'] ?? $asset)['embed_url']
+            ?? $this->resolveVariantUrl($asset, 'original')
             ?? $this->resolveVariantUrl($asset, 'thumb');
     }
 
     /**
      * Build a DynamicDelivery transform URL for on-the-fly image processing.
      *
-     * The returned URL points to the API endpoint which 302-redirects to the
-     * signed imgproxy URL.
+     * The URL is the public /media/serve/{uuid}/transform endpoint; private assets
+     * need a session or API token with view access when it is requested.
+     * Visitors without a token only get `w`/`h` of public assets (snapped to the
+     * allowed widths); the other options need a token.
      */
     public function transformUrl(string $uuid, array $options = []): string
     {
@@ -170,15 +239,16 @@ class AssetKiwiClient
 
         $query = $params !== [] ? '?' . http_build_query($params) : '';
 
-        return rtrim($this->apiUrl, '/') . '/api/v1/media/' . $uuid . '/transform' . $query;
+        return rtrim($this->apiUrl, '/') . '/media/serve/' . $uuid . '/transform' . $query;
     }
 
     /**
-     * Build a DynamicDelivery transform URL using a named Image Style preset.
+     * Build a DynamicDelivery transform URL using a named Image Style preset
+     * (its numeric `id` from imageStyles()).
      */
     public function transformUrlByStyle(string $uuid, $imageStyleId): string
     {
-        return rtrim($this->apiUrl, '/') . '/api/v1/media/' . $uuid . '/transform/' . $imageStyleId;
+        return rtrim($this->apiUrl, '/') . '/media/serve/' . $uuid . '/transform/' . $imageStyleId;
     }
 
     public function forgetCache(string $uuid): void

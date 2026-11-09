@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace AssetKiwi\Laravel\Client;
 
 use AssetKiwi\Laravel\OAuth\OAuthManager;
+use Composer\InstalledVersions;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Cache;
@@ -258,8 +259,14 @@ class AssetKiwiClient
 
     private function http(): PendingRequest
     {
+        // Tells asset.kiwi which integration calls (shown with the token there).
+        $version = InstalledVersions::isInstalled('assetkiwi/laravel') ? (InstalledVersions::getPrettyVersion('assetkiwi/laravel') ?? 'dev') : 'dev';
+        $host = (string) parse_url((string) config('app.url'), PHP_URL_HOST);
+
         return Http::withToken($this->resolveToken())
             ->acceptJson()
+            ->withUserAgent('AssetKiwi-Laravel/'.$version.' (Laravel '.app()->version().($host !== '' ? '; '.$host : '').')')
+            ->withHeaders(['X-AssetKiwi-Client' => 'laravel/'.$version] + ($host !== '' ? ['X-AssetKiwi-Client-Site' => $host] : []))
             ->baseUrl($this->baseUrl);
     }
 

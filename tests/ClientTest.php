@@ -46,6 +46,18 @@ class ClientTest extends TestCase
         $this->assertCount(2, $result['data']);
     }
 
+    public function test_requests_identify_the_client(): void
+    {
+        $this->app['config']->set('app.url', 'https://site.example.com');
+        Http::fake(['dam.example.com/*' => Http::response(['data' => []])]);
+
+        $this->client()->assets();
+
+        Http::assertSent(fn ($request) => preg_match('#^laravel/\S+$#', $request->header('X-AssetKiwi-Client')[0]) === 1
+            && $request->header('X-AssetKiwi-Client-Site') === ['site.example.com']
+            && preg_match('#^AssetKiwi-Laravel/\S+ \(Laravel \S+; site\.example\.com\)$#', $request->header('User-Agent')[0]) === 1);
+    }
+
     public function test_asset_returns_single_asset(): void
     {
         Http::fake([

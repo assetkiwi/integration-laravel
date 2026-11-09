@@ -181,6 +181,10 @@ $url = AssetKiwi::assetUrl($uuid, ['style' => 'hero']);      // named image styl
 
 ---
 
+### Client identification
+
+Every API request sends `X-AssetKiwi-Client: laravel/<version>`, `X-AssetKiwi-Client-Site: <host>` (from `app.url`) and `User-Agent: AssetKiwi-Laravel/<version> (Laravel <version>; <host>)`, so asset.kiwi shows which integration and site use each token (Manage > API, and the user's connected apps for OAuth). It is informational only and never used for authentication.
+
 ## Filesystem Disk
 
 Register the `assetkiwi` disk in `config/filesystems.php`:
@@ -432,6 +436,7 @@ $this->assertSame('photo.jpg', AssetKiwi::getDisplayName($asset));
 
 ### Unreleased
 
+- API requests identify the package and site (`X-AssetKiwi-Client`, `X-AssetKiwi-Client-Site`, `User-Agent`).
 - `<x-assetkiwi-image>` renders public images from stable transform URLs with a `srcset`; new `imageAttributes()` helper.
 - `assetUrl()` without options returns the stable `embed_url` for public assets.
 - Asset responses are cached for at most 3000 seconds (default `cache_ttl` 3000), and failed lookups are no longer cached.

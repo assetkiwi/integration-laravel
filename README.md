@@ -25,6 +25,8 @@ Add your credentials to `.env`:
 ASSETKIWI_API_URL=https://your-assetkiwi-instance.com
 ASSETKIWI_API_TOKEN=your-api-token
 ASSETKIWI_WEBHOOK_SECRET=your-webhook-secret
+# Optional: workspace signing key (Manage > Dynamic Delivery > Signed URLs). Secret, server-side only.
+ASSETKIWI_SIGNING_KEY=
 ASSETKIWI_CACHE_TTL=3000
 ```
 
@@ -308,6 +310,9 @@ If your model has a `url()` method, it will be included as `source_url` in the u
     :width="400"
     :height="300"
 />
+
+{{-- Cropped to a ratio, with a format --}}
+<x-assetkiwi-image uuid="{{ $asset['uuid'] }}" ratio="16:9" format="webp" />
 ```
 
 The component:
@@ -318,7 +323,9 @@ The component:
 - Uses the image's (or variant's) width/height metadata if `:width` and `:height` are not provided
 - Renders nothing if no URL can be resolved
 
-For your own markup, `AssetKiwi::imageAttributes($asset)` returns `['src' => ..., 'srcset' => ..., 'sizes' => ...]` for a public image, or `null`.
+For your own markup, `AssetKiwi::imageAttributes($asset)` returns `['src' => ..., 'srcset' => ..., 'sizes' => ...]` for a public image, or `null`. Optional second argument: `['ratio' => '16:9', 'format' => 'webp', 'q' => 80]`. With a ratio, each URL is `?w=W&h=round(W/ratio)&fit=crop` (W a width step up to the original's size at that ratio) and the result also has `width`/`height` for that ratio. Ratios advertised in `image_transform.ratios` (default `1:1 4:5 3:4 2:3 9:16 4:3 3:2 16:9 21:9`) are served as is. Any other ratio is snapped client-side to the nearest advertised one (so URLs stay canonical, no 301), unless you pass `'sign' => true` (component: `sign`) and `ASSETKIWI_SIGNING_KEY` is set: then every URL is signed and the exact ratio is served. Ratios must be finite and within 0.05..20, else `InvalidArgumentException`.
+
+**Warning:** never pass request input into `signedTransformUrl()` or into `ratio`/`format`/`q` when `'sign' => true`: each distinct value becomes a new stored variant.
 
 ---
 
@@ -359,7 +366,18 @@ $url = assetkiwi_asset('UUID');
 $url = assetkiwi_asset('UUID', ['w' => 800, 'format' => 'webp']);
 ```
 
-Transform URLs (`{api_url}/media/serve/{uuid}/transform`) are not signed and don't expire. Visitors without an API token can load them only for public assets, and get only `w`/`h` (snapped to the allowed widths, listed in the asset's `image_transform.widths`); `fit`, `format`, `q` and `gravity` need a token.
+Transform URLs (`{api_url}/media/serve/{uuid}/transform`) don't expire. Visitors without an API token can load them only for public assets. The server snaps `w`/`h` up to the workspace width steps (default `160 320 480 640 768 960 1080 1280 1920 2560`), `fit=crop` with both `w` and `h` to the nearest workspace ratio, `format` to the workspace formats (default `webp avif jpg`) and `q` to its steps; non-canonical queries get a 301. `transformUrl()` emits the canonical order (`w, h, fit, q, format, gravity, dpr`); don't send `gravity` for guest URLs, the server picks the crop focus.
+
+### Signed URLs
+
+Set `ASSETKIWI_SIGNING_KEY` to the workspace signing key to lift snapping for one exact URL:
+
+```php
+$url = AssetKiwi::signedTransformUrl($uuid, ['w' => 500, 'h' => 333, 'fit' => 'crop', 'gravity' => 'fp:0.3:0.5']);
+$url = AssetKiwi::signedTransformUrl($uuid, ['w' => 640, 'format' => 'jpg'], now()->addHour()->timestamp); // optional expiry
+```
+
+It throws a `LogicException` when no key is configured. Security: the key is a secret; keep it in `.env`, never in front-end code, and call this only on the server. A signed URL is valid for exactly its parameters (and until `exp`, if set), and anyone who has it can use it. Rotating the key is the only way to revoke signed URLs without `exp`. The uuid must be a 36-char uuid and the URL is always built from `api_url`.
 
 ---
 
@@ -437,6 +455,7 @@ $this->assertSame('photo.jpg', AssetKiwi::getDisplayName($asset));
 ### Unreleased
 
 - API requests identify the package and site (`X-AssetKiwi-Client`, `X-AssetKiwi-Client-Site`, `User-Agent`).
+- Guest transforms: `imageAttributes()` takes `ratio`/`format`/`q`, `<x-assetkiwi-image>` takes `ratio`/`format`, `transformUrl()` accepts `dpr`, new `signedTransformUrl()` and `ASSETKIWI_SIGNING_KEY`; new default width steps, ratios and formats.
 - `<x-assetkiwi-image>` renders public images from stable transform URLs with a `srcset`; new `imageAttributes()` helper.
 - `assetUrl()` without options returns the stable `embed_url` for public assets.
 - Asset responses are cached for at most 3000 seconds (default `cache_ttl` 3000), and failed lookups are no longer cached.

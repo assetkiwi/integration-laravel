@@ -17,10 +17,21 @@ class AssetKiwiClient
 
     public function __construct(
         private readonly string $apiUrl,
-        private readonly string $apiToken,
+        #[\SensitiveParameter] private readonly string $apiToken,
         private readonly int $cacheTtl = 3600,
+        #[\SensitiveParameter] private readonly ?string $signingKey = null,
     ) {
         $this->baseUrl = rtrim($apiUrl, '/') . '/api/v1';
+    }
+
+    public function __debugInfo(): array
+    {
+        return [
+            'apiUrl' => $this->apiUrl,
+            'apiToken' => '***',
+            'signingKey' => $this->signingKey ? '***' : null,
+            'cacheTtl' => $this->cacheTtl,
+        ];
     }
 
     public function assets(array $params = []): array
@@ -38,7 +49,13 @@ class AssetKiwiClient
      * Widths visitors may request from a public transform URL; fallback for
      * responses without `image_transform.widths`.
      */
-    public const DEFAULT_WIDTHS = [160, 320, 640, 960, 1280, 1920, 2560];
+    public const DEFAULT_WIDTHS = [160, 320, 480, 640, 768, 960, 1080, 1280, 1920, 2560];
+
+    /** Crop ratios visitors may request; fallback for responses without `image_transform.ratios`. */
+    public const DEFAULT_RATIOS = ['1:1', '4:5', '3:4', '2:3', '9:16', '4:3', '3:2', '16:9', '21:9'];
+
+    /** Formats visitors may request; fallback for responses without `image_transform.formats`. */
+    public const DEFAULT_FORMATS = ['webp', 'avif', 'jpg'];
 
     /**
      * Fetches an asset. Successful responses are cached (at most
@@ -64,10 +81,17 @@ class AssetKiwiClient
      * src, srcset and sizes for a public image, from the asset's stable
      * transform URL (`image_transform`). Widths above the original are left out.
      *
-     * @return array{src: string, srcset: string, sizes: string}|null  Null when
-     *   the asset has no public transform URL (not public, or not an image).
+     * Options: `ratio` ("16:9", cropped; adds width/height to the result),
+     * `format`, `q` and `sign`. A ratio outside the advertised `ratios` is snapped
+     * here to the nearest advertised one (log scale, like the server), unless
+     * `'sign' => true` and a signing key is set: then every URL is signed with the
+     * exact ratio. Never sign request-derived values: each is a new stored variant.
+     * @throws \InvalidArgumentException for a non-finite ratio or one outside 0.05..20.
+     *
+     * @return array{src: string, srcset: string, sizes: string, width?: int, height?: int}|null
+     *   Null when the asset has no public transform URL (not public, or not an image).
      */
-    public function imageAttributes(array $asset): ?array
+    public function imageAttributes(array $asset, array $options = []): ?array
     {
         $asset = $asset['data'] ?? $asset;
         $base = $asset['image_transform']['url'] ?? null;
@@ -78,15 +102,67 @@ class AssetKiwiClient
         $widths = array_map('intval', $asset['image_transform']['widths'] ?? []) ?: self::DEFAULT_WIDTHS;
         sort($widths);
         $original = (int) ($asset['width'] ?? 0);
-        $usable = $original > 0 ? array_values(array_filter($widths, fn (int $w) => $w <= $original)) : $widths;
+        $originalHeight = (int) ($asset['height'] ?? 0);
+        $extra = array_filter(['q' => $options['q'] ?? null, 'format' => $options['format'] ?? null], fn ($v) => $v !== null && $v !== '');
+
+        $ratio = $options['ratio'] ?? null;
+        [$rw, $rh] = $ratio ? array_map('floatval', explode(':', (string) $ratio) + [1 => 0]) : [0, 0];
+        if ($ratio && ($rw <= 0 || $rh <= 0)) {
+            $ratio = null;
+        }
+        $factor = $ratio ? $rw / $rh : 0;
+        if ($ratio && (! is_finite($factor) || $factor < 0.05 || $factor > 20)) {
+            throw new \InvalidArgumentException('ratio must be between 0.05 and 20.');
+        }
+        $m = [];
+        $sign = $ratio && ! empty($options['sign']) && $this->signingKey
+            && preg_match('#/media/serve/([^/]+)/transform$#', $base, $m);
+        if ($ratio && ! $sign) {
+            $listed = $asset['image_transform']['ratios'] ?? self::DEFAULT_RATIOS;
+            if (! in_array((string) $ratio, $listed, true)) {
+                $best = null;
+                foreach ($listed as $r) {
+                    [$a, $b] = array_map('floatval', explode(':', $r) + [1 => 0]);
+                    if ($a > 0 && $b > 0 && ($best === null || abs(log($a / $b / $factor)) < abs(log($best[0] / $factor)))) {
+                        $best = [$a / $b];
+                    }
+                }
+                if ($best) {
+                    $factor = $best[0];
+                }
+            }
+        }
+
+        $caps = array_filter([$original, $ratio && $originalHeight > 0 ? (int) floor($originalHeight * $factor) : 0]);
+        $cap = $caps ? min($caps) : 0;
+        $usable = $cap > 0 ? array_values(array_filter($widths, fn (int $w) => $w <= $cap)) : $widths;
         $usable = $usable ?: [$widths[0]];
 
-        return [
-            // The server snaps any width up to an allowed one.
-            'src' => $base . '?w=' . min(1280, end($usable)),
-            'srcset' => implode(', ', array_map(fn (int $w) => "{$base}?w={$w} {$w}w", $usable)),
+        $url = function (int $w) use ($base, $ratio, $factor, $extra, $sign, $m) {
+            $params = ['w' => $w] + ($ratio ? ['h' => (int) round($w / $factor), 'fit' => 'crop'] : []) + $extra;
+            if ($sign) {
+                return $this->signedTransformUrl($m[1], $params, null, $base);
+            }
+            // Canonical order (w, h, fit, q, format) avoids a 301 from the server.
+            return $base . '?' . http_build_query($params);
+        };
+
+        // src: the largest step up to 1280 (the server snaps plain widths up anyway).
+        $srcW = $ratio
+            ? max($usable[0], ...array_filter($usable, fn (int $w) => $w <= 1280))
+            : min(1280, end($usable));
+
+        $attrs = [
+            'src' => $url($srcW),
+            'srcset' => implode(', ', array_map(fn (int $w) => $url($w) . " {$w}w", $usable)),
             'sizes' => $original > 0 ? "(max-width: {$original}px) 100vw, {$original}px" : '100vw',
         ];
+        if ($ratio) {
+            $attrs['width'] = $srcW;
+            $attrs['height'] = (int) round($srcW / $factor);
+        }
+
+        return $attrs;
     }
 
     public function update(string $uuid, array $data): array
@@ -212,8 +288,9 @@ class AssetKiwiClient
      *
      * The URL is the public /media/serve/{uuid}/transform endpoint; private assets
      * need a session or API token with view access when it is requested.
-     * Visitors without a token only get `w`/`h` of public assets (snapped to the
-     * allowed widths); the other options need a token.
+     * Visitors without a token get public assets with `w`/`h`/`fit=crop`/`format`/`q`
+     * snapped to the workspace steps, ratios and formats (a 301 to the canonical URL;
+     * emit canonical params and do not send `gravity`). Use signedTransformUrl() for exact values.
      */
     public function transformUrl(string $uuid, array $options = []): string
     {
@@ -228,19 +305,61 @@ class AssetKiwiClient
         if (isset($options['fit'])) {
             $params['fit'] = $options['fit'];
         }
-        if (isset($options['format'])) {
-            $params['format'] = $options['format'];
-        }
         if (isset($options['q'])) {
             $params['q'] = (int) $options['q'];
         }
+        if (isset($options['format'])) {
+            $params['format'] = $options['format'];
+        }
         if (isset($options['gravity'])) {
             $params['gravity'] = $options['gravity'];
+        }
+        if (isset($options['dpr']) && is_numeric($options['dpr'])) {
+            $params['dpr'] = $options['dpr'] + 0;
         }
 
         $query = $params !== [] ? '?' . http_build_query($params) : '';
 
         return rtrim($this->apiUrl, '/') . '/media/serve/' . $uuid . '/transform' . $query;
+    }
+
+    /**
+     * Signed transform URL: the server skips all snapping for this exact URL.
+     * Server-side only; the signing key is a secret. `$expiresAt` is a unix timestamp.
+     * Allowed params: w, h, fit, q, format, gravity, dpr.
+     *
+     * @throws \LogicException when no signing key is configured.
+     */
+    public function signedTransformUrl(string $uuid, array $params, ?int $expiresAt = null, ?string $transformBase = null): string
+    {
+        if (! $this->signingKey) {
+            throw new \LogicException('Set ASSETKIWI_SIGNING_KEY to build signed transform URLs.');
+        }
+        if (! preg_match('/^[0-9a-f-]{36}$/i', $uuid)) {
+            throw new \InvalidArgumentException('Invalid uuid.');
+        }
+        $base = rtrim($this->apiUrl, '/') . '/media/serve/' . $uuid . '/transform';
+        if ($transformBase !== null && $transformBase !== $base) {
+            $given = parse_url($transformBase);
+            $own = parse_url($base);
+            if (($given['scheme'] ?? null) !== $own['scheme'] || ($given['host'] ?? null) !== $own['host']
+                || ($given['port'] ?? null) !== ($own['port'] ?? null)
+                || ($given['path'] ?? null) !== $own['path'] || isset($given['query'])) {
+                throw new \InvalidArgumentException('transformBase does not match the configured api_url and uuid.');
+            }
+        }
+
+        $params = array_intersect_key($params, array_flip(['w', 'h', 'fit', 'q', 'format', 'gravity', 'dpr']));
+        if (isset($params['dpr']) && ! is_numeric($params['dpr'])) {
+            unset($params['dpr']);
+        }
+        $params['exp'] = $expiresAt;
+        $params = array_filter($params, fn ($v) => $v !== null && $v !== '');
+        ksort($params, SORT_STRING);
+        $query = http_build_query($params);
+        $signature = hash_hmac('sha256', "{$uuid}?{$query}", $this->signingKey);
+
+        return "{$base}?{$query}&s={$signature}";
     }
 
     /**

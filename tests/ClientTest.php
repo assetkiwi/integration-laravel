@@ -399,4 +399,128 @@ class ClientTest extends TestCase
         $this->expectException(\League\Flysystem\UnableToMoveFile::class);
         $adapter->move('a', 'b', new \League\Flysystem\Config());
     }
+
+    private function signingClient(): AssetKiwiClient
+    {
+        return new AssetKiwiClient('https://dam.example.com', 't', 0, 'test-signing-key');
+    }
+
+    private function publicAsset(array $extra = []): array
+    {
+        return ['uuid' => 'u1', 'width' => 3000, 'height' => 2000, 'image_transform' => [
+            'url' => 'https://dam.example.com/media/serve/0b9f6f2e-3c1d-4f5a-9e8b-7a6c5d4e3f21/transform',
+            'widths' => AssetKiwiClient::DEFAULT_WIDTHS,
+        ] + $extra];
+    }
+
+    public function test_transform_url_canonical_order_with_dpr_and_no_gravity_needed(): void
+    {
+        $url = $this->client()->transformUrl('u', ['gravity' => 'center', 'dpr' => 2, 'format' => 'webp', 'q' => 80, 'fit' => 'crop', 'h' => 5, 'w' => 9]);
+
+        $this->assertSame('https://dam.example.com/media/serve/u/transform?w=9&h=5&fit=crop&q=80&format=webp&gravity=center&dpr=2', $url);
+    }
+
+    public function test_image_attributes_format_and_q_passthrough(): void
+    {
+        $a = $this->client()->imageAttributes($this->publicAsset(), ['q' => 80, 'format' => 'avif']);
+
+        $this->assertStringContainsString('transform?w=160&q=80&format=avif 160w', $a['srcset']);
+        $this->assertSame('https://dam.example.com/media/serve/0b9f6f2e-3c1d-4f5a-9e8b-7a6c5d4e3f21/transform?w=1280&q=80&format=avif', $a['src']);
+    }
+
+    public function test_image_attributes_ratio_caps_by_source_and_rounds_height(): void
+    {
+        // height 2000 * 16/9 = 3555 > 3000 width; cap 3000 -> all steps. 4:3 caps at 2666 -> 2560 max.
+        $a = $this->client()->imageAttributes($this->publicAsset(), ['ratio' => '16:9']);
+        $this->assertStringContainsString('transform?w=160&h=90&fit=crop 160w', $a['srcset']);
+        $this->assertStringContainsString('transform?w=480&h=270&fit=crop 480w', $a['srcset']);
+        $this->assertStringContainsString('transform?w=1080&h=608&fit=crop 1080w', $a['srcset']);
+        $this->assertSame('https://dam.example.com/media/serve/0b9f6f2e-3c1d-4f5a-9e8b-7a6c5d4e3f21/transform?w=1280&h=720&fit=crop', $a['src']);
+        $this->assertSame(1280, $a['width']);
+        $this->assertSame(720, $a['height']);
+
+        $asset = $this->publicAsset();
+        $asset['width'] = 1000;
+        $asset['height'] = 500; // 1:1 caps at 500 -> max step 480
+        $b = $this->client()->imageAttributes($asset, ['ratio' => '1:1']);
+        $this->assertStringEndsWith('w=480&h=480&fit=crop 480w', $b['srcset']);
+        $this->assertSame(480, $b['width']);
+    }
+
+    public function test_image_attributes_off_list_ratio_unsigned_without_key_signed_with_key(): void
+    {
+        $plain = $this->client()->imageAttributes($this->publicAsset(), ['ratio' => '5:2']);
+        $this->assertStringNotContainsString('&s=', $plain['srcset']);
+
+        $implicit = $this->signingClient()->imageAttributes($this->publicAsset(), ['ratio' => '5:2']);
+        $this->assertStringNotContainsString('&s=', $implicit['srcset']);
+        // 5:2 = 2.5 snaps to 21:9 (2.33) vs 16:9 (1.78): w=160 -> h=round(160/(21/9))=69
+        $this->assertStringContainsString('transform?w=160&h=69&fit=crop 160w', $implicit['srcset']);
+
+        $signed = $this->signingClient()->imageAttributes($this->publicAsset(), ['ratio' => '5:2', 'sign' => true]);
+        $this->assertStringContainsString('&s=', $signed['srcset']);
+        $this->assertStringContainsString('h=64&', $signed['srcset']);
+        $listed = $this->signingClient()->imageAttributes($this->publicAsset(), ['ratio' => '16:9']);
+        $this->assertStringNotContainsString('&s=', $listed['srcset']);
+    }
+
+    public function test_signed_transform_url_test_vectors(): void
+    {
+        $c = $this->signingClient();
+        $uuid = '0b9f6f2e-3c1d-4f5a-9e8b-7a6c5d4e3f21';
+
+        $this->assertSame(
+            "https://dam.example.com/media/serve/{$uuid}/transform?fit=crop&gravity=fp%3A0.3%3A0.5&h=333&w=500&s=4503193ad0e527f42e70504a63cc2644528904bc5adee9963cecd4e2e23f09db",
+            $c->signedTransformUrl($uuid, ['w' => 500, 'h' => 333, 'fit' => 'crop', 'gravity' => 'fp:0.3:0.5']),
+        );
+        $this->assertSame(
+            "https://dam.example.com/media/serve/{$uuid}/transform?dpr=1.5&exp=1893456000&format=jpg&q=75&w=640&s=f0abd7daf9bbec56cb9d7187f08f02f6ce1d52c807d22d96f1021e328eb3d3a2",
+            $c->signedTransformUrl($uuid, ['w' => 640, 'format' => 'jpg', 'q' => 75, 'dpr' => 1.5], 1893456000),
+        );
+    }
+
+    public function test_signed_transform_url_throws_without_key(): void
+    {
+        $this->expectException(\LogicException::class);
+        $this->client()->signedTransformUrl('u', ['w' => 1]);
+    }
+
+    public function test_ratio_out_of_range_throws(): void
+    {
+        foreach (['1e-308:1e308', '100:1', '1:100'] as $r) {
+            try {
+                $this->client()->imageAttributes($this->publicAsset(), ['ratio' => $r]);
+                $this->fail("no throw for {$r}");
+            } catch (\InvalidArgumentException) {
+                $this->addToAssertionCount(1);
+            }
+        }
+    }
+
+    public function test_debug_info_masks_secrets(): void
+    {
+        $dump = print_r($this->signingClient(), true) . var_export($this->signingClient()->__debugInfo(), true);
+        $this->assertStringNotContainsString('test-signing-key', $dump);
+        $this->assertStringContainsString('***', $dump);
+    }
+
+    public function test_signed_url_validates_uuid_and_base(): void
+    {
+        $c = $this->signingClient();
+        $uuid = '0b9f6f2e-3c1d-4f5a-9e8b-7a6c5d4e3f21';
+        foreach (['../x', 'abc'] as $bad) {
+            try { $c->signedTransformUrl($bad, ['w' => 1]); $this->fail('uuid'); } catch (\InvalidArgumentException) { $this->addToAssertionCount(1); }
+        }
+        foreach (['https://evil.example.com/media/serve/'.$uuid.'/transform', 'https://dam.example.com/media/serve/other/transform'] as $bad) {
+            try { $c->signedTransformUrl($uuid, ['w' => 1], null, $bad); $this->fail('base'); } catch (\InvalidArgumentException) { $this->addToAssertionCount(1); }
+        }
+        $ok = $c->signedTransformUrl($uuid, ['w' => 1], null, 'https://dam.example.com/media/serve/'.$uuid.'/transform');
+        $this->assertStringStartsWith('https://dam.example.com/media/serve/'.$uuid.'/transform?w=1&s=', $ok);
+    }
+
+    public function test_non_numeric_dpr_is_dropped(): void
+    {
+        $this->assertSame('https://dam.example.com/media/serve/u/transform?w=9', $this->client()->transformUrl('u', ['w' => 9, 'dpr' => 'x']));
+        $this->assertStringNotContainsString('dpr', $this->signingClient()->signedTransformUrl('0b9f6f2e-3c1d-4f5a-9e8b-7a6c5d4e3f21', ['w' => 9, 'dpr' => 'x']));
+    }
 }

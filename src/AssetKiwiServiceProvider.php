@@ -25,6 +25,7 @@ class AssetKiwiServiceProvider extends ServiceProvider
                 apiUrl: config('assetkiwi.api_url'),
                 apiToken: config('assetkiwi.api_token'),
                 cacheTtl: (int) config('assetkiwi.cache_ttl', 3000),
+                signingKey: config('assetkiwi.signing_key') ?: null,
             );
         });
 

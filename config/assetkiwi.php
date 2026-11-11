@@ -3,6 +3,8 @@
 return [
     'api_url' => env('ASSETKIWI_API_URL', ''),
     'api_token' => env('ASSETKIWI_API_TOKEN', ''),
+    // Secret: server-side only. Enables signedTransformUrl() and exact off-list crop ratios.
+    'signing_key' => env('ASSETKIWI_SIGNING_KEY', ''),
     'webhook_secret' => env('ASSETKIWI_WEBHOOK_SECRET', ''),
     // Seconds; capped at 3000 so cached signed URLs (valid 60 min) never expire.
     'cache_ttl' => env('ASSETKIWI_CACHE_TTL', 3000),

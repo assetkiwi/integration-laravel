@@ -26,13 +26,16 @@ class Image extends Component
         public readonly ?string $class = null,
         public readonly ?int $width = null,
         public readonly ?int $height = null,
+        public readonly ?string $ratio = null,
+        public readonly ?string $format = null,
+        public readonly bool $sign = false,
     ) {
         $asset = $client->asset($uuid);
         $this->asset = $asset['data'] ?? $asset;
 
         // Public images: stable, resizable URLs with a srcset. Others: the
         // API's signed variant URL, which expires after about an hour.
-        $public = $client->imageAttributes($this->asset);
+        $public = $client->imageAttributes($this->asset, ['ratio' => $ratio, 'format' => $format, 'sign' => $sign]);
         $this->srcset = $public['srcset'] ?? null;
         $this->sizes = $public['sizes'] ?? null;
         $this->src = $public['src']
@@ -45,8 +48,8 @@ class Image extends Component
             ?? '';
 
         $variantData = $public ? $this->asset : collect($this->asset['variants'] ?? [])->firstWhere('variant_name', $variant);
-        $this->imgWidth  = $width  ?? ($variantData['width']  ?? null);
-        $this->imgHeight = $height ?? ($variantData['height'] ?? null);
+        $this->imgWidth  = $width  ?? $public['width']  ?? ($variantData['width']  ?? null);
+        $this->imgHeight = $height ?? $public['height'] ?? ($variantData['height'] ?? null);
     }
 
     public function render(): View

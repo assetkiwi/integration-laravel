@@ -227,6 +227,21 @@ class AssetKiwiClient
         ]))->json() ?? [];
     }
 
+    /** Where the asset is used, across every site that reports to asset.kiwi: rows of source_site, source_entity_type, source_entity_id, source_url. */
+    public function usages(string $uuid): array
+    {
+        return $this->http()->get("/assets/{$uuid}/usage")->json('data') ?? [];
+    }
+
+    /** Where the picture is cropped around, as percentages from the top left (needs assets:write). */
+    public function focalPoint(string $uuid, float $x, float $y): bool
+    {
+        $ok = $this->http()->post("/assets/{$uuid}/focal-point", ['focal_x' => $x, 'focal_y' => $y])->successful();
+        Cache::forget("assetkiwi.asset.{$uuid}");
+
+        return $ok;
+    }
+
     public function removeUsage(string $uuid, string $entityType, string $entityId, ?string $site = null): bool
     {
         return $this->http()->delete("/assets/{$uuid}/usage", array_filter([

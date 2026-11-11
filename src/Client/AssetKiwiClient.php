@@ -197,6 +197,25 @@ class AssetKiwiClient
             ->post('/assets', $params);
     }
 
+    /**
+     * Upload and return the asset's uuid, treating a duplicate as success: the existing asset is returned.
+     *
+     * @return array{uuid: string, duplicate: bool}
+     * @throws \RuntimeException with the API's message when asset.kiwi refuses (403: the token lacks assets:write).
+     */
+    public function uploadAsset(string $filePath, ?string $filename = null, array $params = []): array
+    {
+        $res = $this->upload($filePath, $filename, $params);
+        if ($res->successful() && $res->json('data.uuid')) {
+            return ['uuid' => $res->json('data.uuid'), 'duplicate' => false];
+        }
+        if ($res->status() === 409 && $res->json('existing_uuid')) {
+            return ['uuid' => $res->json('existing_uuid'), 'duplicate' => true];
+        }
+
+        throw new \RuntimeException((string) ($res->json('message') ?: 'asset.kiwi refused the upload.'), $res->status());
+    }
+
     public function collections(array $params = []): array
     {
         return $this->http()->get('/collections', $params)->json() ?? [];

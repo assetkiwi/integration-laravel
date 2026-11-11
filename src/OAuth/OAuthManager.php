@@ -13,7 +13,7 @@ class OAuthManager
     /**
      * Build the authorization URL with PKCE challenge.
      */
-    public static function getAuthorizationUrl(): string
+    public static function getAuthorizationUrl(?string $returnTo = null): string
     {
         $codeVerifier = Str::random(64);
         $codeChallenge = rtrim(strtr(base64_encode(hash('sha256', $codeVerifier, true)), '+/', '-_'), '=');
@@ -26,7 +26,8 @@ class OAuthManager
         // back to '/'. Safe to call from EnsureAssetKiwiToken — it runs as
         // route middleware, so request()->fullUrl() is the real page the
         // user was trying to reach, not an internal API sub-request.
-        redirect()->setIntendedUrl(request()->fullUrl());
+        // Pass $returnTo from a dedicated connect route, where the current URL is the wrong place to come back to.
+        redirect()->setIntendedUrl($returnTo ?? request()->fullUrl());
 
         $params = [
             'client_id' => config('assetkiwi.oauth.client_id'),
@@ -77,6 +78,12 @@ class OAuthManager
             ],
             now()->addSeconds($tokenData['expires_in'])
         );
+    }
+
+    /** Whether the user has signed in to asset.kiwi (or per-user OAuth is off, so nobody needs to). */
+    public static function connected($user): bool
+    {
+        return ! config('assetkiwi.oauth.enabled', false) || ($user && self::getToken($user) !== null);
     }
 
     /**

@@ -16,6 +16,21 @@ use Orchestra\Testbench\TestCase;
 
 class OAuthTest extends TestCase
 {
+    public function test_a_return_url_can_be_passed_and_connected_follows_the_token(): void
+    {
+        $user = new class { public $id = 7; };
+        $this->assertFalse(OAuthManager::connected($user));
+
+        OAuthManager::getAuthorizationUrl('https://app.test/admin/media');
+        $this->assertSame('https://app.test/admin/media', session('url.intended'));
+
+        OAuthManager::storeToken($user, ['access_token' => 't', 'expires_in' => 3600]);
+        $this->assertTrue(OAuthManager::connected($user));
+
+        config(['assetkiwi.oauth.enabled' => false]);
+        $this->assertTrue(OAuthManager::connected(null));
+    }
+
     protected function getPackageProviders($app): array
     {
         return [AssetKiwiServiceProvider::class];

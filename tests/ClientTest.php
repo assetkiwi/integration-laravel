@@ -29,6 +29,33 @@ class ClientTest extends TestCase
         return $this->app->make(AssetKiwiClient::class);
     }
 
+    public function test_upload_asset_returns_the_uuid_and_treats_a_duplicate_as_success(): void
+    {
+        $file = tempnam(sys_get_temp_dir(), 'ak');
+        file_put_contents($file, 'x');
+        Http::fakeSequence('dam.example.com/api/v1/assets')
+            ->push(['data' => ['uuid' => 'new-1']], 201)
+            ->push(['message' => 'dup', 'existing_uuid' => 'old-1'], 409)
+            ->push(['message' => 'No'], 403);
+
+        $this->assertSame(['uuid' => 'new-1', 'duplicate' => false], $this->client()->uploadAsset($file));
+        $this->assertSame(['uuid' => 'old-1', 'duplicate' => true], $this->client()->uploadAsset($file));
+        $this->expectExceptionCode(403);
+        $this->client()->uploadAsset($file);
+    }
+
+    public function test_usages_and_focal_point(): void
+    {
+        Http::fake([
+            'dam.example.com/api/v1/assets/a1/usage' => Http::response(['data' => [['source_site' => 'x.test']]]),
+            'dam.example.com/api/v1/assets/a1/focal-point' => Http::response(['data' => []]),
+        ]);
+
+        $this->assertSame('x.test', $this->client()->usages('a1')[0]['source_site']);
+        $this->assertTrue($this->client()->focalPoint('a1', 30, 70));
+        Http::assertSent(fn ($r) => str_ends_with($r->url(), '/focal-point') && $r['focal_x'] == 30);
+    }
+
     public function test_assets_returns_array(): void
     {
         Http::fake([

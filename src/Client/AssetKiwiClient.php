@@ -207,7 +207,7 @@ class AssetKiwiClient
      */
     public function upload(string $filePath, ?string $filename = null, array $params = []): Response
     {
-        return $this->http()
+        return $this->http(retry: false) // a POST that may have stored the file is not repeated
             ->timeout(120) // a file takes longer than an API answer
             ->attach('file', fopen($filePath, 'r'), $filename ?? basename($filePath))
             ->post('/assets', $params);
@@ -435,7 +435,7 @@ class AssetKiwiClient
         return "assetkiwi.asset.{$uuid}".($user && OAuthManager::getToken($user) ? ".u{$user->id}" : '');
     }
 
-    private function http(): PendingRequest
+    private function http(bool $retry = true): PendingRequest
     {
         // Tells asset.kiwi which integration calls (shown with the token there).
         $version = InstalledVersions::isInstalled('assetkiwi/laravel') ? (InstalledVersions::getPrettyVersion('assetkiwi/laravel') ?? 'dev') : 'dev';
@@ -447,12 +447,13 @@ class AssetKiwiClient
             ->withHeaders(['X-AssetKiwi-Client' => 'laravel/'.$version] + ($host !== '' ? ['X-AssetKiwi-Client-Site' => $host] : []))
             ->baseUrl($this->baseUrl)
             // A slow or down asset.kiwi must not hold a page request for minutes: fail fast, retry what may pass (connection errors, 5xx,
-            // 429 after the Retry-After it names), and hand a failed response back instead of throwing it.
+            // 429 when its Retry-After is at most 5 s: a longer wait is handed back as the 429), and hand a failed response back instead of throwing it.
             ->timeout(8)->connectTimeout(3)
             ->retry(
-                2,
-                fn (int $attempt, \Throwable $e) => $e instanceof RequestException && is_numeric($wait = $e->response->header('Retry-After')) ? min(2000, max(0, (int) $wait) * 1000) : 200,
-                fn (\Throwable $e) => $e instanceof ConnectionException || ($e instanceof RequestException && ($e->response->serverError() || $e->response->status() === 429)),
+                $retry ? 2 : 1, // attempts in total
+                fn (int $attempt, \Throwable $e) => $e instanceof RequestException && is_numeric($wait = $e->response->header('Retry-After')) ? min(5000, max(0, (int) $wait) * 1000) : 200,
+                fn (\Throwable $e) => $e instanceof ConnectionException
+                    || ($e instanceof RequestException && ($e->response->serverError() || ($e->response->status() === 429 && (! is_numeric($w = $e->response->header('Retry-After')) || $w <= 5)))),
                 throw: false,
             );
     }

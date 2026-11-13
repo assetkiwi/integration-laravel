@@ -118,7 +118,7 @@ class ClientTest extends TestCase
     public function test_failed_asset_lookups_are_not_cached_and_ttl_stays_below_signed_url_lifetime(): void
     {
         Http::fakeSequence('dam.example.com/api/v1/assets/abc-123')
-            ->push([], 500)
+            ->push([], 404) // not a 5xx: that would be retried (see test_a_failing_asset_kiwi_is_retried...)
             ->push(['data' => ['uuid' => 'abc-123']]);
         Cache::spy();
 
@@ -549,5 +549,34 @@ class ClientTest extends TestCase
     {
         $this->assertSame('https://dam.example.com/media/serve/u/transform?w=9', $this->client()->transformUrl('u', ['w' => 9, 'dpr' => 'x']));
         $this->assertStringNotContainsString('dpr', $this->signingClient()->signedTransformUrl('0b9f6f2e-3c1d-4f5a-9e8b-7a6c5d4e3f21', ['w' => 9, 'dpr' => 'x']));
+    }
+
+    public function test_a_failing_asset_kiwi_is_retried_and_a_connection_error_surfaces(): void
+    {
+        Http::fakeSequence('dam.example.com/api/v1/assets')->push(['message' => 'down'], 503)->push(['data' => [1]], 200);
+        $this->assertSame(200, $this->client()->get('/assets')->status());
+        Http::assertSentCount(2);
+
+        // A client error is not retried: it is the answer.
+        Http::swap(new \Illuminate\Http\Client\Factory);
+        Http::fake(['dam.example.com/*' => Http::response(['message' => 'no'], 401)]);
+        $this->assertSame(401, $this->client()->get('/assets')->status());
+        Http::assertSentCount(1);
+
+        Http::swap(new \Illuminate\Http\Client\Factory);
+        Http::fake(fn () => throw new \Illuminate\Http\Client\ConnectionException('refused'));
+        $this->expectException(\Illuminate\Http\Client\ConnectionException::class);
+        $this->client()->get('/assets');
+    }
+
+    public function test_requests_have_short_timeouts(): void
+    {
+        Http::fake(['dam.example.com/*' => Http::response([])]);
+        $this->client()->assets();
+        $m = new \ReflectionMethod($this->client(), 'http');
+        $m->setAccessible(true);
+        $options = $m->invoke($this->client())->getOptions();
+        $this->assertSame(8, $options['timeout']);
+        $this->assertSame(3, $options['connect_timeout']);
     }
 }

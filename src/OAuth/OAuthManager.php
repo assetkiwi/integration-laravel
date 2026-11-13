@@ -53,6 +53,8 @@ class OAuthManager
             'client_id' => config('assetkiwi.oauth.client_id'),
             'client_secret' => config('assetkiwi.oauth.client_secret'),
             'code_verifier' => $codeVerifier,
+            // asset.kiwi's token endpoint requires it and compares it with the one the code was issued for.
+            'redirect_uri' => config('assetkiwi.oauth.redirect_uri'),
         ]);
 
         if (! $response->successful()) {
@@ -92,8 +94,13 @@ class OAuthManager
     public static function getToken($user): ?string
     {
         $token = session()->get('assetkiwi.oauth.access_token');
-        if ($token) {
+        $expires = session()->get('assetkiwi.oauth.expires_at');
+        if ($token && (! $expires || \Illuminate\Support\Carbon::parse($expires)->isFuture())) {
             return $token;
+        }
+        // Expired: forget it. asset.kiwi's token endpoint only issues an access token (no refresh token), so the user signs in again.
+        if ($token) {
+            session()->forget(['assetkiwi.oauth.access_token', 'assetkiwi.oauth.expires_at']);
         }
 
         $cached = cache()->get('assetkiwi.oauth.token.' . $user->id);

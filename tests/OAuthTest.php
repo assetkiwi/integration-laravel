@@ -116,7 +116,8 @@ class OAuthTest extends TestCase
                 && $request['code'] === 'auth-code'
                 && $request['client_id'] === 'client-id-123'
                 && $request['client_secret'] === 'client-secret-456'
-                && $request['code_verifier'] === 'verifier-string';
+                && $request['code_verifier'] === 'verifier-string'
+                && $request['redirect_uri'] === 'https://app.test/assetkiwi/oauth/callback'; // the DAM's token endpoint requires it
         });
 
         $this->assertIsArray($result);
@@ -181,6 +182,21 @@ class OAuthTest extends TestCase
         ], now()->subHour());
 
         $this->assertNull(OAuthManager::getToken($user));
+    }
+
+    public function test_get_token_ignores_an_expired_session_token(): void
+    {
+        $user = new \stdClass();
+        $user->id = 91;
+        session()->put('assetkiwi.oauth.access_token', 'old');
+        session()->put('assetkiwi.oauth.expires_at', now()->subMinute());
+
+        $this->assertNull(OAuthManager::getToken($user));
+        $this->assertNull(session('assetkiwi.oauth.access_token'));
+
+        session()->put('assetkiwi.oauth.access_token', 'fresh');
+        session()->put('assetkiwi.oauth.expires_at', now()->addHour());
+        $this->assertSame('fresh', OAuthManager::getToken($user));
     }
 
     // ── AssetKiwiClient resolveToken ──────────────────────────────────────────

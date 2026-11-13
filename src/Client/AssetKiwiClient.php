@@ -6,7 +6,9 @@ namespace AssetKiwi\Laravel\Client;
 
 use AssetKiwi\Laravel\OAuth\OAuthManager;
 use Composer\InstalledVersions;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -32,6 +34,18 @@ class AssetKiwiClient
             'signingKey' => $this->signingKey ? '***' : null,
             'cacheTtl' => $this->cacheTtl,
         ];
+    }
+
+    /**
+     * A GET that hands back the response whatever its status (null body or not), so a caller can tell an outage (a
+     * ConnectionException, 5xx, 429) from "not allowed" (401/403) and from an empty answer. Connection errors and 5xx/429
+     * are retried a couple of times by http().
+     *
+     * @throws ConnectionException when asset.kiwi cannot be reached
+     */
+    public function get(string $path, array $params = []): Response
+    {
+        return $this->http()->get($path, $params);
     }
 
     public function assets(array $params = []): array
@@ -63,7 +77,7 @@ class AssetKiwiClient
      */
     public function asset(string $uuid): array
     {
-        $key = "assetkiwi.asset.{$uuid}";
+        $key = $this->assetCacheKey($uuid);
         if (($cached = Cache::get($key)) !== null) {
             return $cached;
         }
@@ -71,7 +85,8 @@ class AssetKiwiClient
         $response = $this->http()->get("/assets/{$uuid}");
         $asset = $response->successful() ? ($response->json() ?? []) : [];
         if ($asset !== [] && $this->cacheTtl > 0) {
-            Cache::put($key, $asset, min($this->cacheTtl, self::MAX_ASSET_CACHE_SECONDS));
+            // A per-user copy (OAuth) is what that user may see: keep it short, it is not reachable from forgetCache() for other users.
+            Cache::put($key, $asset, min($this->cacheTtl, $key === "assetkiwi.asset.{$uuid}" ? self::MAX_ASSET_CACHE_SECONDS : 300));
         }
 
         return $asset;
@@ -168,14 +183,14 @@ class AssetKiwiClient
     public function update(string $uuid, array $data): array
     {
         $result = $this->http()->patch("/assets/{$uuid}", $data)->json() ?? [];
-        Cache::forget("assetkiwi.asset.{$uuid}");
+        $this->forgetCache($uuid);
         return $result;
     }
 
     public function delete(string $uuid): bool
     {
         $response = $this->http()->delete("/assets/{$uuid}");
-        Cache::forget("assetkiwi.asset.{$uuid}");
+        $this->forgetCache($uuid);
         return $response->successful();
     }
 
@@ -193,6 +208,7 @@ class AssetKiwiClient
     public function upload(string $filePath, ?string $filename = null, array $params = []): Response
     {
         return $this->http()
+            ->timeout(120) // a file takes longer than an API answer
             ->attach('file', fopen($filePath, 'r'), $filename ?? basename($filePath))
             ->post('/assets', $params);
     }
@@ -256,7 +272,7 @@ class AssetKiwiClient
     public function focalPoint(string $uuid, float $x, float $y): bool
     {
         $ok = $this->http()->post("/assets/{$uuid}/focal-point", ['focal_x' => $x, 'focal_y' => $y])->successful();
-        Cache::forget("assetkiwi.asset.{$uuid}");
+        $this->forgetCache($uuid);
 
         return $ok;
     }
@@ -408,6 +424,15 @@ class AssetKiwiClient
     public function forgetCache(string $uuid): void
     {
         Cache::forget("assetkiwi.asset.{$uuid}");
+        Cache::forget($this->assetCacheKey($uuid));
+    }
+
+    /** The shared key, or one per signed-in user while per-user OAuth is on (what a user may see is not what the shared token may). */
+    private function assetCacheKey(string $uuid): string
+    {
+        $user = config('assetkiwi.oauth.enabled', false) ? request()->user() : null;
+
+        return "assetkiwi.asset.{$uuid}".($user && OAuthManager::getToken($user) ? ".u{$user->id}" : '');
     }
 
     private function http(): PendingRequest
@@ -420,7 +445,16 @@ class AssetKiwiClient
             ->acceptJson()
             ->withUserAgent('AssetKiwi-Laravel/'.$version.' (Laravel '.app()->version().($host !== '' ? '; '.$host : '').')')
             ->withHeaders(['X-AssetKiwi-Client' => 'laravel/'.$version] + ($host !== '' ? ['X-AssetKiwi-Client-Site' => $host] : []))
-            ->baseUrl($this->baseUrl);
+            ->baseUrl($this->baseUrl)
+            // A slow or down asset.kiwi must not hold a page request for minutes: fail fast, retry what may pass (connection errors, 5xx,
+            // 429 after the Retry-After it names), and hand a failed response back instead of throwing it.
+            ->timeout(8)->connectTimeout(3)
+            ->retry(
+                2,
+                fn (int $attempt, \Throwable $e) => $e instanceof RequestException && is_numeric($wait = $e->response->header('Retry-After')) ? min(2000, max(0, (int) $wait) * 1000) : 200,
+                fn (\Throwable $e) => $e instanceof ConnectionException || ($e instanceof RequestException && ($e->response->serverError() || $e->response->status() === 429)),
+                throw: false,
+            );
     }
 
     /**

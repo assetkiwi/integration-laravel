@@ -180,4 +180,15 @@ class WebhookTest extends TestCase
             'event' => 'webhook.test',
         ], ['X-Webhook-Signature' => 'whatever'])->assertStatus(403);
     }
+
+    public function test_a_replaced_file_dispatches_its_own_event_and_any_valid_call_records_that_webhooks_arrive(): void
+    {
+        Event::fake();
+        $this->postWebhook(['event' => 'asset.version_uploaded', 'data' => ['uuid' => 'u-1']])->assertOk();
+        Event::assertDispatched(\AssetKiwi\Laravel\Events\AssetVersionUploaded::class, fn ($e) => $e->uuid === 'u-1');
+        $this->assertGreaterThan(0, (int) cache('assetkiwi.webhook.last_seen'));
+
+        $this->postWebhook(['event' => 'asset.status_changed', 'data' => ['uuid' => 'u-2']])->assertOk();
+        Event::assertDispatched(AssetUpdated::class, fn ($e) => $e->uuid === 'u-2');
+    }
 }
